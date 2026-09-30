@@ -1,0 +1,6 @@
+{
+  "name": "StreamHub",
+  "description": "Next-generation video sharing and streaming platform with channels, creator studio, HLS playback, engagement, and discovery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

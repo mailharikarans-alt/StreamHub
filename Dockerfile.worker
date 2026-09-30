@@ -1,0 +1,14 @@
+# StreamHub FFmpeg Transcoder Worker
+FROM node:20-alpine AS base
+WORKDIR /app
+
+# Install FFmpeg and required system libraries
+RUN apk add --no-cache ffmpeg python3 make g++
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+ENV NODE_ENV=production
+CMD ["npx", "tsx", "server/worker/index.ts"]

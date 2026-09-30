@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: streamhub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-streamhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-streamhub_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-streamhub_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-streamhub} -d ${POSTGRES_DB:-streamhub_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Redis Cache & BullMQ Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: streamhub-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 3. MinIO S3-Compatible Object Storage
+  minio:
+    image: minio/minio:RELEASE.2024-03-30T09-41-56Z
+    container_name: streamhub-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Web Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO Bucket Auto-Provisioning
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin123};
+      /usr/bin/mc mb local/streamhub-raw --ignore-existing;
+      /usr/bin/mc mb local/streamhub-hls --ignore-existing;
+      /usr/bin/mc mb local/streamhub-thumbnails --ignore-existing;
+      /usr/bin/mc anonymous set download local/streamhub-hls;
+      /usr/bin/mc anonymous set download local/streamhub-thumbnails;
+      exit 0;
+      "
+
+  # 4. FFmpeg Video Transcoder Background Worker (Phase 2)
+  transcoder-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: streamhub-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-streamhub}:${POSTGRES_PASSWORD:-streamhub_secret}@postgres:5432/${POSTGRES_DB:-streamhub_db}?schema=public
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      S3_BUCKET_RAW: streamhub-raw
+      S3_BUCKET_HLS: streamhub-hls
+      S3_BUCKET_THUMBNAILS: streamhub-thumbnails
+      S3_REGION: us-east-1
+      S3_FORCE_PATH_STYLE: "true"
+
+  # 5. StreamHub App Server (Web + API)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streamhub-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-streamhub}:${POSTGRES_PASSWORD:-streamhub_secret}@postgres:5432/${POSTGRES_DB:-streamhub_db}?schema=public
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_URL: http://localhost:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      JWT_SECRET: ${JWT_SECRET:-super-secret-jwt-key-change-in-production}
+      APP_URL: http://localhost:3000
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
